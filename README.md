@@ -27,41 +27,50 @@ This is an **educational keylogger** project originally inspired by [Shaun Halve
 
 ---
 
-## 🗂️ Files Included
+## 🗂️ Project Structure
 
-- `modules/crypto.py` – Handles encryption/decryption.  
-- `modules/keylogger.py` – Keylogging logic with optional character grouping.  
-- `modules/gui.py` – Tkinter GUI for controlling the keylogger and viewing logs.  
-- `logs/` – Directory where encrypted logs are stored.  
-- `secret.key` / `salt.bin` – Encryption key and salt (generated after first run).  
-- `README.md` – This documentation.  
-- `LICENSE` – MIT License.  
+keylogger/
+├─ startup.py
+├─ modules/
+│  ├─ gui_ctk.py
+│  ├─ keylogger.py
+│  └─ crypto.py
+├─ logs/
+├─ requirements.txt
+└─ README.md
+
+---
+
+## 🗂️ Project Structure
+- Python 3.10+
+- Windows/macOS/Linux
+- Linux GUI needs Tk runtime: sudo apt-get install -y python3-tk
 
 ---
 
 ## ▶️ How to Run
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/keylogger-educational.git
-   cd keylogger-educational
-2. **Create and activate a virtual environment (recommended):**
-   ```bash
-    python -m venv .venv
-    source .venv/bin/activate   # macOS/Linux
-    .venv\Scripts\activate      # Windows
-3. **Install dependencies:**
-   ```bash
-    pip install pynput cryptography pywin32 psutil
-4. **Install dependencies:**
-   ```bash
-    python -m modules.gui
-5. **Using the GUI:**
-- Enter a password and click Init Key (first-time setup).
-- Click Start Logging to begin recording keystrokes.
-- Select any .enc log from the left panel to view decrypted content. 
-- Use the Search box, Type filter, and column sorting for analysis.
-- Click Export Decrypted to save a plaintext copy.
+### 1) Clone
+git clone https://github.com/<your-username>/keylogger.git
+cd keylogger
+
+### 2) Virtual env
+python -m venv .venv
+### macOS/Linux:
+source .venv/bin/activate
+### Windows:
+.venv\Scripts\activate
+
+## 3) Install deps
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+### Linux only (Tk):
+sudo apt-get update && sudo apt-get install -y python3-tk
+
+### 4) Run GUI
+python startup.py
+
+---
 
 ## 🎓 Source Tutorial
 Original tutorial for basic keylogging:
