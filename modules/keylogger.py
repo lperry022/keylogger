@@ -178,7 +178,7 @@ class KeyloggerService:
 # Usage example:
 def main():
     def print_line(line):
-        print(line)
+        pass
 
     ui_q = queue.Queue()
 
